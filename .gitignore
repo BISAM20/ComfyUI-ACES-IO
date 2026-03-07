@@ -1,0 +1,24 @@
+# Downloaded ACES 1.2 config (~130 MB) — installed at runtime via the Download node
+configs/aces_1.2/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Claude Code session data
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
