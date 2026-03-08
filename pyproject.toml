@@ -19,6 +19,6 @@ Repository   = "https://github.com/BISAM20/ComfyUI-ACES-IO"
 Issues       = "https://github.com/BISAM20/ComfyUI-ACES-IO/issues"
 
 [tool.comfy]
-PublisherId = "BISAM20"
+PublisherId = "bisam20"
 DisplayName = "ComfyUI-ACES-IO"
 Icon        = ""
