@@ -45,6 +45,22 @@ def _cfg_id(ocio_config):
     return str(id(ocio_config))
 
 
+def _tensor_to_pil_frames(tensor: torch.Tensor) -> list:
+    """Convert a [B, H, W, C] float32 tensor to a list of PIL Images (uint8)."""
+    frames = []
+    for i in range(tensor.shape[0]):
+        frame = tensor[i].cpu().float().numpy()
+        frame = (frame * 255.0).clip(0, 255).astype(np.uint8)
+        C = frame.shape[2]
+        if C == 1:
+            frames.append(Image.fromarray(frame[:, :, 0], mode="L").convert("RGB"))
+        elif C == 4:
+            frames.append(Image.fromarray(frame, mode="RGBA"))
+        else:
+            frames.append(Image.fromarray(frame[:, :, :3], mode="RGB"))
+    return frames
+
+
 def _save_preview(tensor: torch.Tensor) -> list:
     """
     Save a [B,H,W,C] float32 IMAGE tensor to ComfyUI's temp folder as PNG.
@@ -53,19 +69,42 @@ def _save_preview(tensor: torch.Tensor) -> list:
     temp_dir = folder_paths.get_temp_directory()
     os.makedirs(temp_dir, exist_ok=True)
     results = []
-    for i in range(tensor.shape[0]):
-        frame = tensor[i].cpu().float().numpy()
-        frame = (frame * 255.0).clip(0, 255).astype(np.uint8)
-        if frame.shape[2] == 1:
-            img = Image.fromarray(frame[:, :, 0], mode="L")
-        elif frame.shape[2] == 4:
-            img = Image.fromarray(frame, mode="RGBA")
-        else:
-            img = Image.fromarray(frame[:, :, :3], mode="RGB")
+    for img in _tensor_to_pil_frames(tensor):
         filename = f"aces_io_preview_{uuid.uuid4().hex[:12]}.png"
         img.save(os.path.join(temp_dir, filename))
         results.append({"filename": filename, "subfolder": "", "type": "temp"})
     return results
+
+
+def _save_animated_preview(tensor: torch.Tensor, fps: float = 24.0) -> list:
+    """
+    Save a [B,H,W,C] tensor to ComfyUI's temp folder.
+
+    Single frame  → PNG  (same as _save_preview)
+    Multi-frame   → animated WebP  (ComfyUI's frontend plays it natively)
+
+    Returns the list of image dicts for ComfyUI's UI preview system.
+    """
+    temp_dir = folder_paths.get_temp_directory()
+    os.makedirs(temp_dir, exist_ok=True)
+    frames = _tensor_to_pil_frames(tensor)
+
+    if len(frames) == 1:
+        filename = f"aces_io_preview_{uuid.uuid4().hex[:12]}.png"
+        frames[0].save(os.path.join(temp_dir, filename))
+        return [{"filename": filename, "subfolder": "", "type": "temp"}]
+
+    duration_ms = max(1, int(1000.0 / fps))
+    filename = f"aces_io_preview_{uuid.uuid4().hex[:12]}.webp"
+    path = os.path.join(temp_dir, filename)
+    frames[0].save(
+        path,
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+    return [{"filename": filename, "subfolder": "", "type": "temp"}]
 
 
 # ============================================================================
@@ -676,30 +715,226 @@ class ACESIOEXRSaver:
 
 
 # ============================================================================
-#  10. ACESIOEXRLoader  —  load an EXR file as IMAGE tensor
+#  Helpers — Nuke-style sequence detection & loading
+# ============================================================================
+
+def _detect_exr_sequence(path: str):
+    """
+    Nuke-style sequence auto-detection (mirrors nuke.getFileNameList logic).
+
+    Handles ALL common VFX naming conventions:
+      render.####.exr          Nuke hash notation
+      render.%04d.exr          printf notation
+      render.0001.exr          dot-separated frame  (any padding)
+      render_0001.exr          underscore-separated frame
+      render-0001.exr          hyphen-separated frame
+      0001.exr                 frame-only name
+      ~/path/render.0001.exr   tilde expansion
+      /dir with [brackets]/    glob-safe directory escaping
+
+    Returns (template, sorted_frame_list) or (path, None) for plain files.
+    template is always a printf-style absolute path.
+    """
+    import glob as _glob
+
+    # Expand ~ and normalise to absolute path
+    path    = os.path.expanduser(path.strip())
+    dirpath = os.path.dirname(os.path.abspath(path))
+    bname   = os.path.basename(path)
+
+    # ── 1. Already a pattern?  #### or %04d ──────────────────────────────────
+    hash_m   = re.search(r'(#+)', bname)
+    printf_m = re.search(r'(%0*\d*d)', bname)
+
+    if hash_m:
+        pad      = len(hash_m.group(1))
+        template = os.path.join(dirpath,
+                                re.sub(r'#+', f'%0{pad}d', bname, count=1))
+        glob_pat = os.path.join(_glob.escape(dirpath),
+                                re.sub(r'#+', '*',          bname, count=1))
+
+    elif printf_m:
+        template = os.path.join(dirpath, bname)
+        glob_pat = os.path.join(_glob.escape(dirpath),
+                                re.sub(r'%0*\d*d', '*',    bname, count=1))
+
+    else:
+        # ── 2. Concrete file → locate the frame number ───────────────────────
+        # Split off extension: "render_0001", ".exr"
+        root, ext = os.path.splitext(bname)
+
+        # Find every digit group in the stem; use the LAST one as frame number.
+        # This correctly handles v01 prefix tokens: shot_v01_beauty_0042 → 0042
+        digit_ms = list(re.finditer(r'\d+', root))
+        if not digit_ms:
+            # No digits at all → genuinely a single file
+            return path, None
+
+        last_m  = digit_ms[-1]
+        pad     = len(last_m.group())
+        prefix  = root[:last_m.start()]   # e.g. "render_", "render.", "shot_v01_"
+        suffix  = root[last_m.end():]     # anything after the digits (usually empty)
+
+        template = os.path.join(dirpath,
+                                f'{prefix}%0{pad}d{suffix}{ext}')
+        # Escape fixed parts so brackets/parens in dir/prefix don't break glob
+        glob_pat = os.path.join(
+            _glob.escape(dirpath),
+            f'{_glob.escape(prefix)}*{_glob.escape(suffix)}{_glob.escape(ext)}'
+        )
+
+    # ── 3. Build frame-extraction regex from the template ────────────────────
+    tmpl_bname = os.path.basename(template)
+    fmt_m      = re.search(r'%0*\d*d', tmpl_bname)
+    if fmt_m:
+        frame_re = re.compile(
+            r'^'
+            + re.escape(tmpl_bname[:fmt_m.start()])
+            + r'(\d+)'
+            + re.escape(tmpl_bname[fmt_m.end():])
+            + r'$',
+            re.IGNORECASE,
+        )
+    else:
+        frame_re = None   # shouldn't happen, but handled below
+
+    # ── 4. Scan disk ─────────────────────────────────────────────────────────
+    try:
+        files = sorted(_glob.glob(glob_pat))
+    except Exception as exc:
+        print(f"[ACES IO] Glob error: {exc}  →  {glob_pat}")
+        return path, None
+
+    frames = []
+    for f in files:
+        bn = os.path.basename(f)
+        if frame_re:
+            m = frame_re.match(bn)
+            if m:
+                frames.append(int(m.group(1)))
+        else:
+            # Fallback: last digit group in stem
+            r2, _ = os.path.splitext(bn)
+            ms = list(re.finditer(r'\d+', r2))
+            if ms:
+                frames.append(int(ms[-1].group()))
+
+    if not frames:
+        print(f"[ACES IO] No sequence found — glob: {glob_pat}")
+        return path, None
+
+    unique_frames = sorted(set(frames))
+    print(f"[ACES IO] Sequence detected: {tmpl_bname}  "
+          f"{unique_frames[0]}–{unique_frames[-1]}  ({len(unique_frames)} frames)")
+    return template, unique_frames
+
+
+def _load_seq(template, frame_list, frame_set, missing_frames, ref_shape_holder):
+    """
+    Load a list of frame numbers from a printf template.
+
+    missing_frames:
+      "error"  → raise FileNotFoundError on any missing frame
+      "black"  → substitute a zero tensor of the same shape
+      "hold"   → repeat the most recent successfully loaded frame
+                 (if no frame loaded yet, hold the next available one instead)
+    """
+    tensors   = []
+    last_good = None
+
+    for i in frame_list:
+        if i in frame_set:
+            t         = load_exr(template % i)
+            last_good = t
+            if not ref_shape_holder:
+                ref_shape_holder.append(t.shape[1:])   # store (H, W, C)
+            tensors.append(t)
+        else:
+            if missing_frames == "error":
+                raise FileNotFoundError(
+                    f"EXR Loader: frame {i} is missing.  "
+                    f"Available: {min(frame_set)}–{max(frame_set)}"
+                )
+            # Need reference shape for black / hold fallback
+            if not ref_shape_holder:
+                first_avail = min(frame_set)
+                ref        = load_exr(template % first_avail)
+                ref_shape_holder.append(ref.shape[1:])
+            H, W, C = ref_shape_holder[0]
+
+            if missing_frames == "black":
+                tensors.append(torch.zeros(1, H, W, C))
+            else:  # "hold"
+                if last_good is not None:
+                    tensors.append(last_good)
+                else:
+                    tensors.append(torch.zeros(1, H, W, C))
+
+    return torch.cat(tensors, dim=0)   # [B, H, W, C]
+
+
+# ============================================================================
+#  10. ACESIOEXRLoader  —  Nuke Read node equivalent
 # ============================================================================
 
 class ACESIOEXRLoader:
     """
-    Load an OpenEXR file and output it as a float32 IMAGE tensor.
+    Load a single EXR or an EXR sequence — mirrors Nuke's Read node.
 
-    The image is loaded as-is (no colorspace conversion).  Connect the
-    output to an ACESIOColorSpace node if you need to convert from the
-    file's colorspace to your working space.
+    file_path
+    ─────────
+    Point at ANY frame of a sequence, a #### / %04d pattern, or a plain file.
+    The node scans the folder automatically to find all available frames
+    (identical to how Nuke's Read node works).
+
+    frame_mode
+    ──────────
+    all     Load every frame found on disk.  first / last are read-only info.
+    range   Load first_frame … last_frame inclusive.  Set both manually.
+    single  Load exactly one frame, specified by first_frame.
+
+    missing_frames
+    ──────────────
+    error   Abort with an exception (default, matches Nuke behaviour).
+    black   Substitute a black frame for any missing frame.
+    hold    Repeat the last successfully loaded frame.
+
+    Outputs: image  [B, H, W, C] · frame_count · first_frame · last_frame
     """
+
+    FRAME_MODES     = ["all", "range", "single"]
+    MISSING_OPTIONS = ["error", "black", "hold"]
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "file_path": ("ACES_PATH", {"default": "",
-                                             "mode": "file",
-                                             "filter": ".exr"}),
-            }
+                "file_path": ("ACES_PATH", {
+                    "default": "",
+                    "mode":    "file",
+                    "filter":  ".exr",
+                }),
+                "frame_mode": (cls.FRAME_MODES, {"default": "all"}),
+            },
+            "optional": {
+                "first_frame": ("INT", {
+                    "default": 1001, "min": 0, "max": 999999,
+                    "tooltip": "Used by 'range' and 'single' modes",
+                }),
+                "last_frame": ("INT", {
+                    "default": 1001, "min": 0, "max": 999999,
+                    "tooltip": "Used by 'range' mode",
+                }),
+                "missing_frames": (cls.MISSING_OPTIONS, {"default": "error"}),
+                "preview_fps": ("FLOAT", {
+                    "default": 24.0, "min": 1.0, "max": 120.0, "step": 0.5,
+                    "tooltip": "Animated preview playback speed",
+                }),
+            },
         }
 
-    RETURN_TYPES  = ("IMAGE",)
-    RETURN_NAMES  = ("image",)
+    RETURN_TYPES  = ("IMAGE", "INT", "INT", "INT")
+    RETURN_NAMES  = ("image", "frame_count", "first_frame", "last_frame")
     FUNCTION      = "load"
     CATEGORY      = "ACES IO/EXR"
     OUTPUT_NODE   = True
@@ -708,190 +943,64 @@ class ACESIOEXRLoader:
     def IS_CHANGED(cls, **kwargs):
         return float("nan")
 
-    def load(self, file_path):
-        path = file_path.strip()
+    def load(self, file_path,
+             frame_mode="all",
+             first_frame=1001, last_frame=1001,
+             missing_frames="error",
+             preview_fps=24.0):
+
+        path = os.path.expanduser(file_path.strip())
         if not path:
-            raise ValueError("ACESIOEXRLoader: file_path is empty.")
-        tensor = load_exr(path)
-        # Clamp to [0,1] for the thumbnail preview only (EXR may be HDR)
+            raise ValueError("EXR Loader: file_path is empty.")
+
+        template, detected = _detect_exr_sequence(path)
+
+        # ── single plain file (no sequence detected) ──────────────────────
+        if detected is None:
+            tensor      = load_exr(path)
+            out_first   = out_last = 0
+            print(f"[ACES IO] EXR Loader: single file  {path}")
+
+        # ── sequence ──────────────────────────────────────────────────────
+        else:
+            disk_first, disk_last = detected[0], detected[-1]
+            frame_set             = set(detected)
+
+            if frame_mode == "all":
+                frames_to_load = detected           # every frame on disk
+                out_first, out_last = disk_first, disk_last
+
+            elif frame_mode == "range":
+                if last_frame < first_frame:
+                    raise ValueError(
+                        f"EXR Loader: last_frame ({last_frame}) < first_frame ({first_frame})."
+                    )
+                frames_to_load = list(range(first_frame, last_frame + 1))
+                out_first, out_last = first_frame, last_frame
+
+            else:  # "single"
+                frames_to_load = [first_frame]
+                out_first = out_last = first_frame
+
+            ref_shape: list = []
+            tensor = _load_seq(template, frames_to_load, frame_set,
+                               missing_frames, ref_shape)
+
+            print(f"[ACES IO] EXR Loader: {frame_mode}  "
+                  f"{out_first}–{out_last}  ({tensor.shape[0]} frames)  "
+                  f"disk: {disk_first}–{disk_last}")
+
+        frame_count    = tensor.shape[0]
         preview_tensor = tensor.clamp(0.0, 1.0)
-        previews = _save_preview(preview_tensor)
-        return {"ui": {"images": previews}, "result": (tensor,)}
-
-
-# ============================================================================
-#  11. ACESIOEXRViewer  —  HDR / EXR preview with OCIO tone-mapping
-# ============================================================================
-
-class ACESIOEXRViewer:
-    """
-    Convert a scene-linear / HDR image to a display-referred output for
-    previewing in ComfyUI's image viewer.
-
-    This is identical in principle to ACESIOViewer but is labelled
-    separately so it's easy to find next to the EXR loader in the menu.
-    Wire an EXR loaded image through this node to see it tone-mapped through
-    the ACES Output Transform (or any other view you choose).
-
-    Exposure / gamma controls mirror Nuke's viewer E and G knobs.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
+        previews       = _save_animated_preview(preview_tensor, fps=preview_fps)
         return {
-            "required": {
-                "image":            ("IMAGE",),
-                "ocio_config":      ("OCIO_CONFIG",),
-                "input_colorspace": ("ACES_COLORSPACE", {"default": "ACEScg"}),
-                "display":          ("ACES_DISPLAY",    {"default": "sRGB - Display"}),
-                "view":             ("ACES_VIEW",        {"default": "ACES 2.0 - SDR 100 nits (Rec.709)"}),
-                "exposure":         ("FLOAT", {"default": 0.0, "min": -10.0, "max": 10.0,
-                                               "step": 0.1,
-                                               "tooltip": "Exposure in stops (scene-linear)"}),
-                "gamma":            ("FLOAT", {"default": 1.0, "min": 0.1, "max": 4.0,
-                                               "step": 0.01,
-                                               "tooltip": "Display-space gamma"}),
-                "channel":          (["RGBA", "R", "G", "B", "A", "Luminance"],
-                                     {"default": "RGBA"}),
-            }
+            "ui":     {"images": previews},
+            "result": (tensor, frame_count, out_first, out_last),
         }
 
-    RETURN_TYPES  = ("IMAGE",)
-    RETURN_NAMES  = ("image",)
-    FUNCTION      = "preview"
-    CATEGORY      = "ACES IO/EXR"
-
-    @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        return float("nan")
-
-    def preview(self, image, ocio_config, input_colorspace, display, view,
-                exposure, gamma, channel):
-        cfg = ocio_config["config"]
-
-        dv = ocio.DisplayViewTransform()
-        dv.setSrc(input_colorspace.strip())
-        dv.setDisplay(display.strip())
-        dv.setView(view.strip())
-
-        pipeline = ocio.LegacyViewingPipeline()
-        pipeline.setDisplayViewTransform(dv)
-
-        exp_t = build_exposure_transform(exposure)
-        if exp_t: pipeline.setLinearCC(exp_t)
-
-        ch_t = build_channel_view_transform(channel)
-        if ch_t: pipeline.setChannelView(ch_t)
-
-        gam_t = build_gamma_transform(gamma)
-        if gam_t: pipeline.setDisplayCC(gam_t)
-
-        try:
-            proc = pipeline.getProcessor(cfg)
-        except ocio.Exception as e:
-            raise ValueError(
-                f"ACESIOEXRViewer: failed to build pipeline.\n"
-                f"  input_colorspace = '{input_colorspace}'\n"
-                f"  display          = '{display}'\n"
-                f"  view             = '{view}'\n"
-                f"OCIO error: {e}"
-            )
-        return (apply_processor(image, proc),)
-
 
 # ============================================================================
-#  12. ACESIODownloadACES12  —  download ACES 1.2 config on demand
-# ============================================================================
-
-class ACESIODownloadACES12:
-    """
-    Download the ACES 1.2 OpenColorIO config (~130 MB) from the
-    colour-science GitHub releases and save it to:
-        ComfyUI-ACES-IO/configs/aces_1.2/config.ocio
-
-    After downloading, restart ComfyUI and connect an ACESIOConfig node —
-    "ACES 1.2  (colour-science / OCIO v1)" will appear in the preset list.
-
-    Connect the output to any node that accepts a STRING to see the status.
-    Set trigger=True to start the download (change the value to re-trigger).
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        from .ocio_utils import _ACES12_CFG
-        already = os.path.isfile(_ACES12_CFG)
-        return {
-            "required": {
-                "trigger": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "Set to True to start the download.",
-                }),
-            }
-        }
-
-    RETURN_TYPES  = ("STRING",)
-    RETURN_NAMES  = ("status",)
-    FUNCTION      = "download"
-    CATEGORY      = "ACES IO/Config"
-    OUTPUT_NODE   = True
-
-    def download(self, trigger: bool):
-        from .ocio_utils import _ACES12_CFG, ACES12_DOWNLOAD_URL, _refresh_aces12, _CONFIGS_DIR
-        import threading, urllib.request, zipfile, shutil
-
-        if os.path.isfile(_ACES12_CFG):
-            return ("ACES 1.2 already downloaded: " + _ACES12_CFG,)
-
-        if not trigger:
-            return ("Set trigger=True to start download (~130 MB).",)
-
-        status_box = ["Downloading…"]
-
-        def _do():
-            tmp = os.path.join(_CONFIGS_DIR, "_aces12_tmp.zip")
-            os.makedirs(_CONFIGS_DIR, exist_ok=True)
-            try:
-                with urllib.request.urlopen(ACES12_DOWNLOAD_URL, timeout=120) as r, \
-                     open(tmp, "wb") as f:
-                    while True:
-                        chunk = r.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-
-                with zipfile.ZipFile(tmp, "r") as zf:
-                    zf.extractall(_CONFIGS_DIR)
-                    extracted = None
-                    for name in zf.namelist():
-                        top = name.split("/")[0]
-                        if top and os.path.isdir(os.path.join(_CONFIGS_DIR, top)):
-                            extracted = top
-                            break
-                    if extracted:
-                        dest = os.path.join(_CONFIGS_DIR, "aces_1.2")
-                        if os.path.isdir(dest):
-                            shutil.rmtree(dest)
-                        os.rename(os.path.join(_CONFIGS_DIR, extracted), dest)
-
-                os.remove(tmp)
-                _refresh_aces12()
-                status_box[0] = "Done! Restart ComfyUI to use ACES 1.2."
-            except Exception as exc:
-                if os.path.isfile(tmp):
-                    try:
-                        os.remove(tmp)
-                    except Exception:
-                        pass
-                status_box[0] = f"Error: {exc}"
-
-        t = threading.Thread(target=_do, daemon=True)
-        t.start()
-        t.join()   # block until done so we can return the final status
-        return (status_box[0],)
-
-
-# ============================================================================
-#  13. ACESIOPreview  —  display an IMAGE tensor inline in the node
+#  11. ACESIOPreview  —  display an IMAGE tensor inline in the node
 # ============================================================================
 
 class ACESIOPreview:
@@ -923,37 +1032,160 @@ class ACESIOPreview:
 
 
 # ============================================================================
+#  12. ACESIOVideoSaver  —  export an IMAGE batch as a video / animated file
+# ============================================================================
+
+class ACESIOVideoSaver:
+    """
+    Export a ComfyUI IMAGE batch (e.g. from the EXR Loader) to a video file.
+
+    Formats
+    ───────
+    MP4 (H.264)      Standard video via OpenCV — plays in any media player.
+    Animated WebP    High-quality lossless/near-lossless, plays in browsers and
+                     most modern viewers.  Best for round-tripping back to ComfyUI.
+    Animated GIF     Universal compatibility; limited to 256 colours.
+
+    output_path
+        Full path including filename.  The correct extension is appended
+        automatically if missing (.mp4 / .webp / .gif).
+
+    The node passes the IMAGE tensor through unchanged so it can sit inline
+    in any graph without interrupting the flow.
+    """
+
+    FORMATS = ["MP4 (H.264)", "Animated WebP", "Animated GIF"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "output_path": ("ACES_PATH", {
+                    "default": os.path.expanduser("~/output.mp4"),
+                    "mode":    "file",
+                    "placeholder": "/path/to/output.mp4  (.mp4 / .webp / .gif)",
+                }),
+                "format": (cls.FORMATS, {"default": "MP4 (H.264)"}),
+                "fps":    ("FLOAT", {
+                    "default": 24.0, "min": 1.0, "max": 120.0, "step": 0.5,
+                    "tooltip": "Frames per second",
+                }),
+            },
+        }
+
+    RETURN_TYPES  = ("IMAGE", "STRING")
+    RETURN_NAMES  = ("images", "saved_path")
+    FUNCTION      = "save_video"
+    CATEGORY      = "ACES IO/EXR"
+    OUTPUT_NODE   = True
+
+    def save_video(self, images, output_path, format, fps):
+        path = output_path.strip()
+        if not path:
+            raise ValueError("ACESIOVideoSaver: output_path is empty.")
+
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+
+        if format == "MP4 (H.264)":
+            if not path.lower().endswith(".mp4"):
+                path += ".mp4"
+            _write_mp4(images, path, fps)
+        elif format == "Animated WebP":
+            if not path.lower().endswith(".webp"):
+                path += ".webp"
+            _write_webp(images, path, fps)
+        elif format == "Animated GIF":
+            if not path.lower().endswith(".gif"):
+                path += ".gif"
+            _write_gif(images, path, fps)
+
+        B = images.shape[0]
+        print(f"[ACES IO] VideoSaver: wrote {B} frames → '{path}'")
+        return {"ui": {"text": [path]}, "result": (images, path)}
+
+
+# ── video-writing helpers ────────────────────────────────────────────────────
+
+def _write_webp(tensor: torch.Tensor, path: str, fps: float):
+    frames = _tensor_to_pil_frames(tensor)
+    duration_ms = max(1, int(1000.0 / fps))
+    frames[0].save(
+        path,
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+
+
+def _write_gif(tensor: torch.Tensor, path: str, fps: float):
+    frames = _tensor_to_pil_frames(tensor)
+    # Quantise to 256-colour palette for GIF
+    palette_frames = [f.convert("RGB").quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+                      for f in frames]
+    duration_ms = max(1, int(1000.0 / fps))
+    palette_frames[0].save(
+        path,
+        save_all=True,
+        append_images=palette_frames[1:],
+        duration=duration_ms,
+        loop=0,
+        optimize=False,
+    )
+
+
+def _write_mp4(tensor: torch.Tensor, path: str, fps: float):
+    try:
+        import cv2
+    except ImportError:
+        raise ImportError(
+            "ACESIOVideoSaver: OpenCV (cv2) is required for MP4 export.\n"
+            "Install with:  pip install opencv-python"
+        )
+    B, H, W, C = tensor.shape
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(path, fourcc, float(fps), (W, H))
+    if not writer.isOpened():
+        raise IOError(f"ACESIOVideoSaver: could not open video writer for '{path}'")
+    for i in range(B):
+        frame = tensor[i].cpu().float().numpy()
+        frame = (frame * 255.0).clip(0, 255).astype(np.uint8)
+        bgr   = frame[:, :, [2, 1, 0]] if C >= 3 else np.repeat(frame, 3, axis=2)
+        writer.write(bgr)
+    writer.release()
+
+
+# ============================================================================
 #  Node registration
 # ============================================================================
 
 NODE_CLASS_MAPPINGS = {
-    "ACESIOConfig":      ACESIOConfig,
-    "ACESIOColorSpace":  ACESIOColorSpace,
-    "ACESIODisplay":     ACESIODisplay,
-    "ACESIOViewer":      ACESIOViewer,
-    "ACESIOLook":        ACESIOLook,
-    "ACESIOFileLUT":     ACESIOFileLUT,
-    "ACESIOLogConvert":  ACESIOLogConvert,
-    "ACESIOInfo":        ACESIOInfo,
-    "ACESIOEXRSaver":    ACESIOEXRSaver,
-    "ACESIOEXRLoader":   ACESIOEXRLoader,
-    "ACESIOEXRViewer":        ACESIOEXRViewer,
-    "ACESIODownloadACES12":   ACESIODownloadACES12,
-    "ACESIOPreview":          ACESIOPreview,
+    "ACESIOConfig":       ACESIOConfig,
+    "ACESIOColorSpace":   ACESIOColorSpace,
+    "ACESIODisplay":      ACESIODisplay,
+    "ACESIOViewer":       ACESIOViewer,
+    "ACESIOLook":         ACESIOLook,
+    "ACESIOFileLUT":      ACESIOFileLUT,
+    "ACESIOLogConvert":   ACESIOLogConvert,
+    "ACESIOInfo":         ACESIOInfo,
+    "ACESIOEXRSaver":     ACESIOEXRSaver,
+    "ACESIOEXRLoader":    ACESIOEXRLoader,
+    "ACESIOVideoSaver":   ACESIOVideoSaver,
+    "ACESIOPreview":      ACESIOPreview,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ACESIOConfig":      "ACES IO — Config Loader",
-    "ACESIOColorSpace":  "ACES IO — ColorSpace  (OCIOColorSpace)",
-    "ACESIODisplay":     "ACES IO — Display Transform  (OCIODisplay)",
-    "ACESIOViewer":      "ACES IO — Viewer  (Nuke Viewer)",
-    "ACESIOLook":        "ACES IO — Look Transform  (OCIOLookTransform)",
-    "ACESIOFileLUT":     "ACES IO — File LUT  (OCIOFileTransform)",
-    "ACESIOLogConvert":  "ACES IO — Log Convert  (OCIOLogConvert)",
-    "ACESIOInfo":        "ACES IO — Config Info",
-    "ACESIOEXRSaver":    "ACES IO — EXR Saver",
-    "ACESIOEXRLoader":   "ACES IO — EXR Loader",
-    "ACESIOEXRViewer":        "ACES IO — EXR Viewer  (HDR preview)",
-    "ACESIODownloadACES12":   "ACES IO — Download ACES 1.2 Config",
-    "ACESIOPreview":          "ACES IO — Preview",
+    "ACESIOConfig":       "ACES IO — Config Loader",
+    "ACESIOColorSpace":   "ACES IO — ColorSpace  (OCIOColorSpace)",
+    "ACESIODisplay":      "ACES IO — Display Transform  (OCIODisplay)",
+    "ACESIOViewer":       "ACES IO — Viewer  (Nuke Viewer)",
+    "ACESIOLook":         "ACES IO — Look Transform  (OCIOLookTransform)",
+    "ACESIOFileLUT":      "ACES IO — File LUT  (OCIOFileTransform)",
+    "ACESIOLogConvert":   "ACES IO — Log Convert  (OCIOLogConvert)",
+    "ACESIOInfo":         "ACES IO — Config Info",
+    "ACESIOEXRSaver":     "ACES IO — EXR Saver",
+    "ACESIOEXRLoader":    "ACES IO — EXR Loader",
+    "ACESIOVideoSaver":   "ACES IO — Video Saver",
+    "ACESIOPreview":      "ACES IO — Preview",
 }

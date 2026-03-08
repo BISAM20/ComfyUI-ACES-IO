@@ -1,7 +1,7 @@
 # ComfyUI-ACES-IO
 
-Professional OpenColorIO / ACES color-management nodes for ComfyUI, mirroring Nuke's OCIO node set exactly.
-Supports **ACES 2.0**, **ACES 1.3**, and **ACES 1.2** — with built-in Nuke-style colorspace pickers, EXR read/write, and a live HDR preview node.
+Professional OpenColorIO / ACES color-management nodes for ComfyUI, mirroring Nuke's OCIO node set.
+Supports **ACES 2.0**, **ACES 1.3**, and **ACES 1.2** — with Nuke-style colorspace pickers, EXR sequence read/write, animated preview, and video export.
 
 ---
 
@@ -9,10 +9,12 @@ Supports **ACES 2.0**, **ACES 1.3**, and **ACES 1.2** — with built-in Nuke-sty
 
 - **Full OCIO pipeline** — every node mirrors its Nuke counterpart
 - **ACES 2.0 & 1.3 built-in** — no download needed (bundled with PyOpenColorIO 2.3+)
-- **ACES 1.2 support** — one-click download via the included Download node (~130 MB)
-- **Nuke-style colorspace picker** — tabbed family browser (ACES / Display / Input/ARRI / Input/Sony / Utility …) with live search
-- **EXR read / write** — full OpenEXR support with all compression codecs and 16f / 32f bit depth
-- **HDR preview** — tone-mapped viewer node with exposure, gamma, and channel controls
+- **ACES 1.2 support** — point the Config Loader at your own `.ocio` / `.ocioz` file
+- **Nuke-style colorspace picker** — tabbed family browser with live search (ACES / Display / Input/ARRI / Input/Sony / Utility …)
+- **EXR Loader (Nuke Read node)** — auto-detects full sequences from any single frame; supports `render.0001.exr`, `render_0001.exr`, `####`, `%04d`; `all` / `range` / `single` frame modes; `error` / `black` / `hold` missing-frame policy
+- **Animated preview** — sequence loads play back as animated WebP directly in the node
+- **Video Saver** — export IMAGE batches to MP4 (H.264), Animated WebP, or Animated GIF
+- **EXR Saver** — full 16f / 32f EXR with ZIP, PIZ, DWAA and all standard codecs
 - **Cache bypass** — every node re-executes on each queue run so colorspace changes always take effect
 
 ---
@@ -28,12 +30,11 @@ Supports **ACES 2.0**, **ACES 1.3**, and **ACES 1.2** — with built-in Nuke-sty
 | ACES IO — Look Transform | OCIOLookTransform | ACES IO/Transform |
 | ACES IO — File LUT | OCIOFileTransform | ACES IO/LUT |
 | ACES IO — Log Convert | OCIOLogConvert | ACES IO/Transform |
-| ACES IO — Config Info | — (utility) | ACES IO/Config |
-| ACES IO — EXR Saver | Write node | ACES IO/EXR |
+| ACES IO — Config Info | — (utility) | ACES IO/Utility |
 | ACES IO — EXR Loader | Read node | ACES IO/EXR |
-| ACES IO — EXR Viewer | — (HDR preview) | ACES IO/EXR |
+| ACES IO — EXR Saver | Write node | ACES IO/EXR |
+| ACES IO — Video Saver | — (MP4 / WebP / GIF export) | ACES IO/EXR |
 | ACES IO — Preview | PreviewImage | ACES IO |
-| ACES IO — Download ACES 1.2 Config | — | ACES IO/Config |
 
 ---
 
@@ -62,12 +63,12 @@ Then restart ComfyUI.
 |---------|---------|
 | `PyOpenColorIO >= 2.3.0` | Core OCIO processing + built-in ACES configs |
 | `numpy` | Image array operations |
-| `Pillow` | Preview thumbnail saving |
+| `Pillow` | Preview thumbnails, animated WebP / GIF export |
+| `opencv-python` | MP4 video export + EXR fallback if OpenEXR is unavailable |
 | `OpenEXR` *(optional)* | Full EXR read/write with all compression codecs |
-| `opencv-python` *(fallback)* | EXR read/write if OpenEXR is not available |
 
-`PyOpenColorIO`, `numpy`, and `Pillow` install automatically via pip.
-For full EXR support install OpenEXR separately:
+`PyOpenColorIO`, `numpy`, `Pillow`, and `opencv-python` install automatically via `pip install -r requirements.txt`.
+For full EXR compression support install OpenEXR:
 
 ```bash
 pip install openexr
@@ -87,6 +88,15 @@ Load Image  →  Config Loader  →  ColorSpace (sRGB → ACEScg)
                                Viewer (ACEScg → sRGB Display)  →  Preview
 ```
 
+### EXR sequence workflow
+
+```
+EXR Loader  →  ColorSpace (scene-linear → ACEScg)  →  Viewer  →  Video Saver
+```
+
+The EXR Loader outputs a `[B, H, W, C]` float32 batch tensor — one item per frame.
+Set `frame_mode = all` to load everything on disk automatically (no manual range needed).
+
 ### Colorspace picker
 
 Every colorspace, display, and view input has a **Browse** button that opens a Nuke-style dialog:
@@ -95,28 +105,49 @@ Every colorspace, display, and view input has a **Browse** button that opens a N
 - **Sub-tabs** — camera manufacturers (ARRI, Sony, RED, Canon …)
 - **Live search** — type anywhere to filter across all colorspaces
 
-### EXR workflow
+---
 
-```
-EXR Loader  →  (optional) ColorSpace  →  EXR Viewer  →  EXR Saver
-```
+## EXR Loader — Frame Modes
 
-The EXR Loader outputs a full float32 HDR tensor.
-The EXR Viewer applies an ACES Output Transform for display.
-The EXR Saver writes 16f or 32f EXR with ZIP / PIZ / DWAA compression.
+| `frame_mode` | Behaviour |
+|---|---|
+| **all** *(default)* | Auto-detects every frame on disk from any single file or pattern |
+| **range** | Loads `first_frame … last_frame` inclusive |
+| **single** | Loads exactly the frame number specified by `first_frame` |
+
+### Supported naming conventions
+
+| Pattern | Example |
+|---|---|
+| Dot-separated | `render.0001.exr` |
+| Underscore-separated | `render_0001.exr` |
+| Hyphen-separated | `render-0001.exr` |
+| Frame-only | `0001.exr` |
+| With version token | `shot_v01_beauty_0042.exr` → uses `0042` as frame |
+| Nuke hash | `render.####.exr` |
+| Printf | `render.%04d.exr` |
+
+### Missing frames policy
+
+| Option | Behaviour |
+|---|---|
+| `error` *(default)* | Raises an exception — matches Nuke default |
+| `black` | Substitutes a black frame |
+| `hold` | Repeats the last successfully loaded frame |
 
 ---
 
-## ACES 1.2
+## Video Saver
 
-ACES 1.2 is not bundled (it is ~130 MB). To install it:
+Export any IMAGE batch to a video file directly from your graph:
 
-1. Add an **ACES IO — Download ACES 1.2 Config** node to your workflow
-2. Set `trigger = True` and queue the prompt
-3. Wait for the status output to read `Done! Restart ComfyUI to use ACES 1.2.`
-4. Restart ComfyUI — the preset **"ACES 1.2  (colour-science / OCIO v1)"** will appear in the Config Loader dropdown
+| Format | Notes |
+|---|---|
+| **MP4 (H.264)** | Standard video via OpenCV — plays in any media player |
+| **Animated WebP** | High-quality, plays in browsers and most modern viewers |
+| **Animated GIF** | Universal compatibility; 256-colour limit |
 
-The config is downloaded from the [colour-science OpenColorIO-Configs](https://github.com/colour-science/OpenColorIO-Configs) GitHub releases and saved to `ComfyUI-ACES-IO/configs/aces_1.2/`.
+The node passes the IMAGE tensor through unchanged so it can sit anywhere in a graph without interrupting the flow.
 
 ---
 
@@ -128,8 +159,10 @@ The config is downloaded from the [colour-science OpenColorIO-Configs](https://g
 | ACES 2.0 Studio | 2.5 | Recommended for live-action / studio |
 | ACES 1.3 CG | 2.1 / 2.3 / 2.4 | Legacy, three OCIO versions |
 | ACES 1.3 Studio | 2.1 / 2.3 / 2.4 | Legacy, three OCIO versions |
-| ACES 1.2 | v1 (colour-science) | Download required (~130 MB) |
+| ACES 1.2 | v1 (colour-science) | Supply path to downloaded config |
 | Custom path | any | Point to your own `.ocio` / `.ocioz` file |
+
+ACES 1.2 config can be downloaded from [colour-science/OpenColorIO-Configs](https://github.com/colour-science/OpenColorIO-Configs).
 
 ---
 
@@ -137,4 +170,5 @@ The config is downloaded from the [colour-science OpenColorIO-Configs](https://g
 
 MIT — see [LICENSE](LICENSE)
 
-The ACES configs bundled within PyOpenColorIO are released under the [Academy Software Foundation (ASWF)](https://www.aswf.io/) open-source license. The ACES 1.2 config downloaded on demand is released by [colour-science](https://github.com/colour-science/OpenColorIO-Configs) under the BSD license.
+The ACES configs bundled within PyOpenColorIO are released under the [Academy Software Foundation (ASWF)](https://www.aswf.io/) open-source license.
+The ACES 1.2 config is released by [colour-science](https://github.com/colour-science/OpenColorIO-Configs) under the BSD license.
