@@ -272,11 +272,24 @@ class ACESIOViewer:
 
         cfg = ocio_config["config"]
 
+        # Validate display/view against the loaded config and fall back to the
+        # config's own defaults when the stored widget values don't exist.
+        # This happens when the user switches ACES config versions.
+        available_displays = get_displays(cfg)
+        resolved_display = display.strip()
+        if resolved_display not in available_displays:
+            resolved_display = cfg.getDefaultDisplay()
+
+        available_views = get_views(cfg, resolved_display)
+        resolved_view = view.strip()
+        if resolved_view not in available_views:
+            resolved_view = cfg.getDefaultView(resolved_display)
+
         # --- DisplayViewTransform ---
         dv = ocio.DisplayViewTransform()
         dv.setSrc(input_colorspace.strip())
-        dv.setDisplay(display.strip())
-        dv.setView(view.strip())
+        dv.setDisplay(resolved_display)
+        dv.setView(resolved_view)
 
         # --- Build LegacyViewingPipeline (exact Nuke viewer order) ---
         pipeline = ocio.LegacyViewingPipeline()
@@ -308,10 +321,10 @@ class ACESIOViewer:
             raise ValueError(
                 f"ACESIOViewer: failed to build viewer pipeline.\n"
                 f"  input_colorspace = '{input_colorspace}'\n"
-                f"  display          = '{display}'\n"
-                f"  view             = '{view}'\n"
+                f"  display          = '{resolved_display}'\n"
+                f"  view             = '{resolved_view}'\n"
                 f"OCIO error: {e}\n"
-                f"Available displays: {get_displays(cfg)}"
+                f"Available displays: {available_displays}"
             )
 
         return (apply_processor(image, proc),)
