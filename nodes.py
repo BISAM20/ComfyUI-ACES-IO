@@ -4,7 +4,6 @@ ComfyUI-ACES-IO  —  OpenColorIO / ACES color-management nodes.
 Mirrors Nuke's OCIO node set exactly:
   ACESIOConfig          ≈  Project Settings → OCIO config
   ACESIOColorSpace      ≈  OCIOColorSpace node
-  ACESIODisplay         ≈  OCIODisplay node
   ACESIOViewer          ≈  Nuke Viewer (display + exposure + gamma + channel view)
   ACESIOLook            ≈  OCIOLookTransform node
   ACESIOFileLUT         ≈  OCIOFileTransform node
@@ -205,78 +204,6 @@ class ACESIOColorSpace:
                 f"OCIOColorSpace: cannot convert '{src}' → '{dst}'.\n"
                 f"OCIO error: {e}\n"
                 f"Available colorspaces: {get_colorspaces(cfg)}"
-            )
-        return (apply_processor(image, proc),)
-
-
-# ============================================================================
-#  3.  ACESIODisplay  —  display / view transform pipeline  (OCIODisplay)
-# ============================================================================
-
-class ACESIODisplay:
-    """
-    Apply a full ACES display-view transform.
-    Mirrors Nuke's OCIODisplay node.
-
-    The pipeline converts the input from its declared colorspace through the
-    chosen (Display, View) pair — exactly the OCIO DisplayViewTransform.
-
-    Optional Looks override: supply a comma/colon separated list of look names
-    (with optional +/– prefix for direction) or leave blank to use the looks
-    embedded in the View definition.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "image":            ("IMAGE",),
-                "ocio_config":      ("OCIO_CONFIG",),
-                "input_colorspace": ("ACES_COLORSPACE", {"default": "ACEScg"}),
-                "display":          ("ACES_DISPLAY",     {"default": "sRGB - Display"}),
-                "view":             ("ACES_VIEW",         {"default": "ACES 2.0 - SDR 100 nits (Rec.709)"}),
-                "direction":        (["Forward", "Inverse"], {"default": "Forward"}),
-            },
-            "optional": {
-                "looks_override":         ("STRING", {"default": "", "multiline": False,
-                                                       "placeholder": "e.g.  ACES 1.3 Reference Gamut Compression"}),
-                "looks_override_enabled": ("BOOLEAN", {"default": False}),
-            },
-        }
-
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("image",)
-    FUNCTION     = "display_transform"
-    CATEGORY     = "ACES IO/Transform"
-
-    @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        return float("nan")
-
-    def display_transform(self, image, ocio_config,
-                          input_colorspace, display, view, direction,
-                          looks_override="", looks_override_enabled=False):
-        cfg = ocio_config["config"]
-
-        dv = ocio.DisplayViewTransform()
-        dv.setSrc(input_colorspace.strip())
-        dv.setDisplay(display.strip())
-        dv.setView(view.strip())
-        if direction == "Inverse":
-            dv.setDirection(ocio.TRANSFORM_DIR_INVERSE)
-
-        pipeline = ocio.LegacyViewingPipeline()
-        pipeline.setDisplayViewTransform(dv)
-        if looks_override_enabled:
-            pipeline.setLooksOverrideEnabled(True)
-            pipeline.setLooksOverride(looks_override.strip())
-
-        try:
-            proc = pipeline.getProcessor(cfg)
-        except ocio.Exception as e:
-            raise ValueError(
-                f"ACESIODisplay: failed to build processor for "
-                f"display='{display}', view='{view}'.\nOCIO error: {e}"
             )
         return (apply_processor(image, proc),)
 
@@ -1170,7 +1097,6 @@ def _write_mp4(tensor: torch.Tensor, path: str, fps: float):
 NODE_CLASS_MAPPINGS = {
     "ACESIOConfig":       ACESIOConfig,
     "ACESIOColorSpace":   ACESIOColorSpace,
-    "ACESIODisplay":      ACESIODisplay,
     "ACESIOViewer":       ACESIOViewer,
     "ACESIOLook":         ACESIOLook,
     "ACESIOFileLUT":      ACESIOFileLUT,
@@ -1185,7 +1111,6 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ACESIOConfig":       "ACES IO — Config Loader",
     "ACESIOColorSpace":   "ACES IO — ColorSpace  (OCIOColorSpace)",
-    "ACESIODisplay":      "ACES IO — Display Transform  (OCIODisplay)",
     "ACESIOViewer":       "ACES IO — Viewer  (Nuke Viewer)",
     "ACESIOLook":         "ACES IO — Look Transform  (OCIOLookTransform)",
     "ACESIOFileLUT":      "ACES IO — File LUT  (OCIOFileTransform)",
