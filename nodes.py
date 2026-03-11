@@ -826,13 +826,15 @@ def _load_seq(template, frame_list, frame_set, missing_frames, ref_shape_holder)
 
 class ACESIOEXRLoader:
     """
-    Load a single EXR or an EXR sequence — mirrors Nuke's Read node.
+    Load a single EXR / EXR sequence, or a plain image (PNG, JPEG, TIFF) —
+    mirrors Nuke's Read node.
 
     file_path
     ─────────
     Point at ANY frame of a sequence, a #### / %04d pattern, or a plain file.
-    The node scans the folder automatically to find all available frames
-    (identical to how Nuke's Read node works).
+    For EXR sequences the node scans the folder automatically to find all
+    available frames (identical to how Nuke's Read node works).
+    PNG, JPEG and TIFF files are loaded as a single frame (frame_count = 1).
 
     frame_mode
     ──────────
@@ -859,7 +861,7 @@ class ACESIOEXRLoader:
                 "file_path": ("ACES_PATH", {
                     "default": "",
                     "mode":    "file",
-                    "filter":  ".exr",
+                    "filter":  ".exr,.png,.jpg,.jpeg,.tiff,.tif",
                 }),
                 "frame_mode": (cls.FRAME_MODES, {"default": "all"}),
             },
@@ -899,6 +901,23 @@ class ACESIOEXRLoader:
         path = os.path.expanduser(file_path.strip())
         if not path:
             raise ValueError("EXR Loader: file_path is empty.")
+
+        # ── non-EXR plain image (PNG, JPEG, TIFF, …) ──────────────────────
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".exr",):
+            img = Image.open(path)
+            if img.mode in ("RGBA", "LA", "PA"):
+                img = img.convert("RGBA")
+            else:
+                img = img.convert("RGB")
+            arr = np.array(img, dtype=np.float32) / 255.0
+            tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, C]
+            print(f"[ACES IO] EXR Loader: plain image ({ext})  {path}")
+            previews = _save_animated_preview(tensor.clamp(0.0, 1.0), fps=preview_fps)
+            return {
+                "ui":     {"images": previews},
+                "result": (tensor, 1, 0, 0),
+            }
 
         template, detected = _detect_exr_sequence(path)
 
@@ -947,7 +966,107 @@ class ACESIOEXRLoader:
 
 
 # ============================================================================
-#  11. ACESIOPreview  —  display an IMAGE tensor inline in the node
+#  11. ACESIOMovLoader  —  load frames from a video file (MOV/MP4/MXF/…)
+# ============================================================================
+
+class ACESIOMovLoader:
+    """
+    Load frames from a video file (.mov, .mp4, .mxf, etc.) including Apple
+    ProRes .mov. Uses PyAV (pip install av) for broad codec support including
+    ProRes 4444, ProRes 422, DNxHD, etc.
+    """
+
+    CATEGORY    = "ACES IO/EXR"
+    FUNCTION    = "load"
+    RETURN_TYPES  = ("IMAGE", "INT", "INT", "INT")
+    RETURN_NAMES  = ("image", "frame_count", "first_frame", "last_frame")
+    OUTPUT_NODE   = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "file_path": ("ACES_PATH", {
+                    "default": "",
+                    "mode":   "file",
+                    "filter": ".mov,.mp4,.mxf,.avi,.mkv",
+                }),
+                "frame_mode": (["all", "range"], {"default": "all"}),
+            },
+            "optional": {
+                "first_frame": ("INT", {
+                    "default": 0, "min": 0, "max": 999999,
+                    "tooltip": "0-based frame index, used by 'range' mode",
+                }),
+                "last_frame": ("INT", {
+                    "default": 0, "min": 0, "max": 999999,
+                    "tooltip": "0-based frame index inclusive, used by 'range' mode",
+                }),
+                "preview_fps": ("FLOAT", {
+                    "default": 24.0, "min": 1.0, "max": 120.0, "step": 0.5,
+                }),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+    def load(self, file_path,
+             frame_mode="all",
+             first_frame=0, last_frame=0,
+             preview_fps=24.0):
+
+        try:
+            import av
+        except ImportError:
+            raise ImportError(
+                "[ACES IO] PyAV is required for video loading.\n"
+                "Install with: pip install av"
+            )
+
+        path = os.path.expanduser(file_path.strip())
+        if not path:
+            raise ValueError("ACESIOMovLoader: file_path is empty.")
+
+        container = av.open(path)
+        stream = container.streams.video[0]
+
+        frames_np = []
+        for frame in container.decode(stream):
+            arr = frame.to_ndarray(format="rgb24").astype(np.float32) / 255.0
+            frames_np.append(arr)
+
+        container.close()
+
+        if not frames_np:
+            raise RuntimeError(f"ACESIOMovLoader: no video frames found in '{path}'.")
+
+        if frame_mode == "range":
+            frames_np = frames_np[first_frame: last_frame + 1]
+            first_frame_idx = first_frame
+            last_frame_idx  = last_frame
+        else:
+            first_frame_idx = 0
+            last_frame_idx  = len(frames_np) - 1
+
+        # Stack into [B, H, W, C]
+        tensor = torch.from_numpy(np.stack(frames_np, axis=0))
+        frame_count = tensor.shape[0]
+
+        print(
+            f"[ACES IO] MovLoader: {frame_count} frames loaded from '{os.path.basename(path)}'"
+        )
+
+        previews = _save_animated_preview(tensor.clamp(0.0, 1.0), fps=preview_fps)
+        return {
+            "ui":     {"images": previews},
+            "result": (tensor, frame_count, first_frame_idx, last_frame_idx),
+        }
+
+
+# ============================================================================
+#  12. ACESIOPreview  —  display an IMAGE tensor inline in the node
 # ============================================================================
 
 class ACESIOPreview:
@@ -1117,6 +1236,7 @@ NODE_CLASS_MAPPINGS = {
     "ACESIOInfo":         ACESIOInfo,
     "ACESIOEXRSaver":     ACESIOEXRSaver,
     "ACESIOEXRLoader":    ACESIOEXRLoader,
+    "ACESIOMovLoader":    ACESIOMovLoader,
     "ACESIOVideoSaver":   ACESIOVideoSaver,
     "ACESIOPreview":      ACESIOPreview,
 }
@@ -1131,6 +1251,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ACESIOInfo":         "ACES IO — Config Info",
     "ACESIOEXRSaver":     "ACES IO — EXR Saver",
     "ACESIOEXRLoader":    "ACES IO — EXR Loader",
+    "ACESIOMovLoader":    "ACES IO — Video Loader  (MOV/ProRes)",
     "ACESIOVideoSaver":   "ACES IO — Video Saver",
     "ACESIOPreview":      "ACES IO — Preview",
 }

@@ -15,6 +15,10 @@ import subprocess
 import sys
 import shutil
 import importlib.util
+import os
+import urllib.request
+import zipfile
+import tempfile
 
 
 def _pip(*args):
@@ -80,11 +84,86 @@ def try_install_ocio() -> bool:
 
 
 def install_pip_deps():
-    deps = ["numpy", "Pillow", "opencv-python", "openexr"]
+    deps = ["numpy", "Pillow", "opencv-python", "openexr", "av"]
     if _pip(*deps) != 0:
         print(f"[ACES IO] Warning: could not install one or more of {deps}")
+
+
+def download_aces12():
+    """
+    Auto-download and extract the ACES 1.2 OpenColorIO config if not already present.
+    Downloads from the colour-science OpenColorIO-Configs GitHub release.
+    Does NOT raise on error — installation continues regardless.
+    """
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+    dest_dir = os.path.join(_HERE, "configs", "aces_1.2")
+    config_file = os.path.join(dest_dir, "config.ocio")
+
+    if os.path.isfile(config_file):
+        print("[ACES IO] ACES 1.2 config already present — OK")
+        return
+
+    url = (
+        "https://github.com/colour-science/OpenColorIO-Configs/releases/download/"
+        "v1.2/OpenColorIO-Config-ACES-1.2.zip"
+    )
+    print(f"[ACES IO] Downloading ACES 1.2 config from:\n  {url}")
+
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="aces_io_")
+        zip_path = os.path.join(tmp_dir, "aces_1.2.zip")
+
+        downloaded = 0
+        last_printed_mb = 0
+        PRINT_EVERY = 10 * 1024 * 1024  # 10 MB
+
+        def _reporthook(block_num, block_size, total_size):
+            nonlocal downloaded, last_printed_mb
+            downloaded += block_size
+            if downloaded - last_printed_mb >= PRINT_EVERY:
+                mb = downloaded / (1024 * 1024)
+                total_mb = total_size / (1024 * 1024) if total_size > 0 else "?"
+                print(f"[ACES IO]   {mb:.0f} MB / {total_mb} MB downloaded …")
+                last_printed_mb = downloaded
+
+        urllib.request.urlretrieve(url, zip_path, reporthook=_reporthook)
+        print(f"[ACES IO] Download complete. Extracting …")
+
+        extract_dir = os.path.join(tmp_dir, "extracted")
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir)
+
+        # The zip contains a top-level folder named OpenColorIO-Config-ACES-1.2/
+        src_dir = os.path.join(extract_dir, "OpenColorIO-Config-ACES-1.2")
+        if not os.path.isdir(src_dir):
+            # Fallback: find any directory inside extract_dir
+            entries = [
+                e for e in os.listdir(extract_dir)
+                if os.path.isdir(os.path.join(extract_dir, e))
+            ]
+            if entries:
+                src_dir = os.path.join(extract_dir, entries[0])
+            else:
+                raise RuntimeError(
+                    f"[ACES IO] Could not locate config directory inside zip."
+                )
+
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copytree(src_dir, dest_dir, dirs_exist_ok=True)
+        print(f"[ACES IO] ACES 1.2 config installed to: {dest_dir}")
+
+    except Exception as exc:
+        print(f"[ACES IO] Warning: could not download ACES 1.2 config: {exc}")
+        print("[ACES IO]   You can install it manually from:")
+        print(f"[ACES IO]   {url}")
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
     try_install_ocio()
     install_pip_deps()
+    download_aces12()
