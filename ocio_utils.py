@@ -6,7 +6,14 @@ Config loading, caching, and image processing helpers.
 import os
 import numpy as np
 import torch
-import PyOpenColorIO as ocio
+try:
+    import PyOpenColorIO as ocio
+except ImportError as _e:
+    raise ImportError(
+        "[ACES IO] PyOpenColorIO is not installed.\n"
+        "Run:  pip install opencolorio>=2.3.0\n"
+        "  or: conda install -c conda-forge opencolorio>=2.3.0"
+    ) from _e
 from typing import Dict, Optional
 import logging
 

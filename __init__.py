@@ -23,8 +23,26 @@ Nodes (mirroring Nuke's OCIO set):
 """
 
 import os
+import importlib.util
+import logging
 
-from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+_logger = logging.getLogger(__name__)
+
+# Check for PyOpenColorIO before attempting to import nodes so that a missing
+# OCIO installation shows a single, actionable message rather than a traceback.
+if importlib.util.find_spec("PyOpenColorIO") is None:
+    _logger.error(
+        "\n"
+        "[ACES IO] PyOpenColorIO is not installed — nodes will not load.\n"
+        "Install it with one of:\n"
+        "  pip install opencolorio>=2.3.0\n"
+        "  conda install -c conda-forge opencolorio>=2.3.0\n"
+        "Then restart ComfyUI."
+    )
+    NODE_CLASS_MAPPINGS = {}
+    NODE_DISPLAY_NAME_MAPPINGS = {}
+else:
+    from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
 # Serve web/js to the ComfyUI frontend
 WEB_DIRECTORY = "web"

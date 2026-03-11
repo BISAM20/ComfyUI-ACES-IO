@@ -12,7 +12,14 @@ from .ocio_utils import (
     load_config, BUILTIN_CONFIGS, _refresh_aces12,
     _CONFIGS_DIR, _ACES12_CFG, ACES12_DOWNLOAD_URL, ACES12_DOWNLOAD_SIZE,
 )
-import PyOpenColorIO as ocio
+try:
+    import PyOpenColorIO as ocio
+except ImportError as _e:
+    raise ImportError(
+        "[ACES IO] PyOpenColorIO is not installed.\n"
+        "Run:  pip install opencolorio>=2.3.0\n"
+        "  or: conda install -c conda-forge opencolorio>=2.3.0"
+    ) from _e
 
 logger = logging.getLogger(__name__)
 routes = PromptServer.instance.routes

@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-aces-io"
-version = "1.1.1"
+version = "1.1.2"
 description = "OpenColorIO / ACES color-management nodes for ComfyUI — mirrors Nuke's OCIO node set with ACES 2.0, 1.3, and 1.2 support, EXR sequence loading, animated preview, and video export."
 license = { file = "LICENSE" }
 readme = "README.md"
@@ -8,7 +8,10 @@ requires-python = ">=3.9"
 keywords = ["comfyui", "ocio", "aces", "color-management", "opencolorio", "vfx"]
 
 dependencies = [
-    "PyOpenColorIO>=2.3.0",
+    # PyOpenColorIO is NOT on PyPI under that name.
+    # install.py (run by ComfyUI Manager) installs it via:
+    #   pip install opencolorio>=2.3.0
+    #   or: conda install -c conda-forge opencolorio>=2.3.0
     "numpy",
     "Pillow",
     "opencv-python",

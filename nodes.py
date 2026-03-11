@@ -17,7 +17,14 @@ import numpy as np
 import os
 import re
 import uuid
-import PyOpenColorIO as ocio
+try:
+    import PyOpenColorIO as ocio
+except ImportError as _e:
+    raise ImportError(
+        "[ACES IO] PyOpenColorIO is not installed.\n"
+        "Run:  pip install opencolorio>=2.3.0\n"
+        "  or: conda install -c conda-forge opencolorio>=2.3.0"
+    ) from _e
 import folder_paths
 from PIL import Image
 

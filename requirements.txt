@@ -1,4 +1,7 @@
-PyOpenColorIO>=2.3.0
+# PyOpenColorIO is NOT on PyPI under that name.
+# install.py (run automatically by ComfyUI Manager) handles it via:
+#   pip install opencolorio>=2.3.0
+#   or: conda install -c conda-forge opencolorio>=2.3.0
 numpy
 Pillow
 opencv-python
