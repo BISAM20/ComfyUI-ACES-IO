@@ -80,7 +80,7 @@ def try_install_ocio() -> bool:
 
 
 def install_pip_deps():
-    deps = ["numpy", "Pillow", "opencv-python"]
+    deps = ["numpy", "Pillow", "opencv-python", "openexr"]
     if _pip(*deps) != 0:
         print(f"[ACES IO] Warning: could not install one or more of {deps}")
 

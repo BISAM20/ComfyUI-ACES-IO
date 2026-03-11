@@ -7,6 +7,9 @@ import os
 import numpy as np
 import torch
 
+# Must be set before cv2 is imported, otherwise OpenEXR support stays disabled.
+os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+
 try:
     import OpenEXR
     import Imath

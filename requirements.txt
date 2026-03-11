@@ -5,3 +5,4 @@
 numpy
 Pillow
 opencv-python
+openexr
