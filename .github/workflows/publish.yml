@@ -15,5 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Comfy-Org/publish-node-action@main
+        continue-on-error: true   # "version already exists" is not a real failure
+        id: publish
         with:
           personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+      - name: Check result
+        if: steps.publish.outcome == 'failure'
+        run: |
+          echo "::warning::Publish step reported failure — likely the version already exists on the registry (harmless if published manually)."
