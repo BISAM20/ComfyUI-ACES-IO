@@ -36,6 +36,7 @@ ACES12_DOWNLOAD_SIZE = 130_123_781   # ~130 MB
 
 # ---------------------------------------------------------------------------
 # Built-in configs  (OCIO 2.x built-in registry)
+# ACES 1.2 is always listed; load_config auto-downloads it on first use.
 # ---------------------------------------------------------------------------
 BUILTIN_CONFIGS: Dict[str, str] = {
     "ACES 2.0 CG  [Recommended]":        "cg-config-v4.0.0_aces-v2.0_ocio-v2.5",
@@ -46,35 +47,18 @@ BUILTIN_CONFIGS: Dict[str, str] = {
     "ACES 1.3 Studio (OCIO 2.3)":         "studio-config-v2.1.0_aces-v1.3_ocio-v2.3",
     "ACES 1.3 CG  (OCIO 2.1 / legacy)":  "cg-config-v1.0.0_aces-v1.3_ocio-v2.1",
     "ACES 1.3 Studio (OCIO 2.1 / legacy)":"studio-config-v1.0.0_aces-v1.3_ocio-v2.1",
-    "Custom path  (ACES 1.2 / other)":    "__custom__",
+    "ACES 1.2  (colour-science / OCIO v1)": _ACES12_CFG,
+    "Custom path  (other)":               "__custom__",
 }
 
-# Inject ACES 1.2 if already downloaded
-# Defined as a mutable list so that after a post-import download + _refresh_aces12()
-# call from __init__.py, nodes.py's binding (same object) sees the updated keys.
-BUILTIN_CONFIG_KEYS: list = []
+# Mutable list so nodes.py's imported binding always reflects the current keys.
+BUILTIN_CONFIG_KEYS: list = list(BUILTIN_CONFIGS.keys())
 
 
 def _refresh_aces12():
-    key = "ACES 1.2  (colour-science / OCIO v1)"
-    if os.path.isfile(_ACES12_CFG):
-        BUILTIN_CONFIGS[key] = _ACES12_CFG
-        # Move it right after the 1.3 entries, before Custom
-        ordered = list(BUILTIN_CONFIGS.items())
-        # ensure it's not duplicated
-        ordered = [(k, v) for k, v in ordered if k != key]
-        insert_at = next((i for i, (k, _) in enumerate(ordered) if k.startswith("Custom")), len(ordered))
-        ordered.insert(insert_at, (key, _ACES12_CFG))
-        BUILTIN_CONFIGS.clear()
-        BUILTIN_CONFIGS.update(ordered)
-    else:
-        BUILTIN_CONFIGS.pop(key, None)
-    # Mutate in-place so all importers of this list see the change
+    """No-op kept for compatibility; list is now always populated."""
     BUILTIN_CONFIG_KEYS.clear()
     BUILTIN_CONFIG_KEYS.extend(BUILTIN_CONFIGS.keys())
-
-
-_refresh_aces12()
 
 # ---------------------------------------------------------------------------
 # Channel-view matrices  (row-major 4×4, same convention as Nuke viewer)
@@ -114,12 +98,23 @@ def load_config(preset: str, custom_path: str = "") -> ocio.Config:
                 raise FileNotFoundError(f"OCIO config not found: '{key}'")
             _config_cache[key] = ocio.Config.CreateFromFile(key)
         return _config_cache[key]
-    elif os.path.isfile(builtin_name):
-        # Local file path (e.g. ACES 1.2 downloaded config)
+    elif builtin_name.endswith(".ocio") or builtin_name.endswith(".ocioz") or os.path.isabs(builtin_name):
+        # Local file path — auto-download ACES 1.2 if it hasn't arrived yet
+        if not os.path.isfile(builtin_name):
+            if builtin_name == _ACES12_CFG:
+                logger.info("[ACES IO] ACES 1.2 config not found — downloading now …")
+                from .install import download_aces12
+                download_aces12()
+            if not os.path.isfile(builtin_name):
+                raise FileNotFoundError(
+                    f"OCIO config not found: '{builtin_name}'\n"
+                    "Download failed or was interrupted."
+                )
         if builtin_name not in _config_cache:
             _config_cache[builtin_name] = ocio.Config.CreateFromFile(builtin_name)
         return _config_cache[builtin_name]
     else:
+        # OCIO built-in registry name (e.g. ACES 1.3, 2.0)
         if builtin_name not in _config_cache:
             _config_cache[builtin_name] = ocio.Config.CreateFromBuiltinConfig(builtin_name)
         return _config_cache[builtin_name]
