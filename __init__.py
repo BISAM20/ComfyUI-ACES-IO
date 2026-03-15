@@ -44,6 +44,23 @@ if importlib.util.find_spec("PyOpenColorIO") is None:
 else:
     from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
+    # Auto-download ACES 1.2 config if not already present, then refresh the
+    # built-in config list so the dropdown includes it on first run.
+    try:
+        from .install import download_aces12
+        from .ocio_utils import _refresh_aces12
+        download_aces12()
+        _refresh_aces12()
+    except Exception as _dl_e:
+        _logger.warning(f"[ACES IO] Could not auto-download ACES 1.2 config: {_dl_e}")
+
+    from .wan_inverse_tonemap import (
+        NODE_CLASS_MAPPINGS        as _WAN_CM,
+        NODE_DISPLAY_NAME_MAPPINGS as _WAN_DNM,
+    )
+    NODE_CLASS_MAPPINGS        = {**NODE_CLASS_MAPPINGS,        **_WAN_CM}
+    NODE_DISPLAY_NAME_MAPPINGS = {**NODE_DISPLAY_NAME_MAPPINGS, **_WAN_DNM}
+
 # Serve web/js to the ComfyUI frontend
 WEB_DIRECTORY = "web"
 

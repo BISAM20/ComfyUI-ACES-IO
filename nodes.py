@@ -1107,20 +1107,31 @@ class ACESIOVideoSaver:
 
     Formats
     ───────
-    MP4 (H.264)      Standard video via OpenCV — plays in any media player.
-    Animated WebP    High-quality lossless/near-lossless, plays in browsers and
-                     most modern viewers.  Best for round-tripping back to ComfyUI.
-    Animated GIF     Universal compatibility; limited to 256 colours.
+    MP4 (H.264)         Standard video via OpenCV — plays in any media player.
+    MOV ProRes 422      Apple ProRes 422       — 10-bit YUV 4:2:2, via PyAV.
+    MOV ProRes 422 HQ   Apple ProRes 422 HQ    — higher bitrate 10-bit YUV 4:2:2.
+    MOV ProRes 4444     Apple ProRes 4444      — 10-bit YUV 4:4:4 (+ alpha if 4-ch).
+    MOV ProRes 4444 XQ  Apple ProRes 4444 XQ   — highest quality 4:4:4 (+ alpha).
+    Animated WebP       High-quality lossless/near-lossless, plays in browsers.
+    Animated GIF        Universal compatibility; limited to 256 colours.
 
     output_path
         Full path including filename.  The correct extension is appended
-        automatically if missing (.mp4 / .webp / .gif).
+        automatically if missing (.mp4 / .mov / .webp / .gif).
 
     The node passes the IMAGE tensor through unchanged so it can sit inline
     in any graph without interrupting the flow.
     """
 
-    FORMATS = ["MP4 (H.264)", "Animated WebP", "Animated GIF"]
+    FORMATS = [
+        "MP4 (H.264)",
+        "MOV ProRes 422",
+        "MOV ProRes 422 HQ",
+        "MOV ProRes 4444",
+        "MOV ProRes 4444 XQ",
+        "Animated WebP",
+        "Animated GIF",
+    ]
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1130,7 +1141,7 @@ class ACESIOVideoSaver:
                 "output_path": ("ACES_PATH", {
                     "default": os.path.expanduser("~/output.mp4"),
                     "mode":    "file",
-                    "placeholder": "/path/to/output.mp4  (.mp4 / .webp / .gif)",
+                    "placeholder": "/path/to/output  (.mp4 / .mov / .webp / .gif)",
                 }),
                 "format": (cls.FORMATS, {"default": "MP4 (H.264)"}),
                 "fps":    ("FLOAT", {
@@ -1157,6 +1168,11 @@ class ACESIOVideoSaver:
             if not path.lower().endswith(".mp4"):
                 path += ".mp4"
             _write_mp4(images, path, fps)
+        elif format in _PRORES_PROFILES:
+            if not path.lower().endswith(".mov"):
+                path += ".mov"
+            profile, is_4444 = _PRORES_PROFILES[format]
+            _write_prores_mov(images, path, fps, profile, is_4444)
         elif format == "Animated WebP":
             if not path.lower().endswith(".webp"):
                 path += ".webp"
@@ -1172,6 +1188,65 @@ class ACESIOVideoSaver:
 
 
 # ── video-writing helpers ────────────────────────────────────────────────────
+
+# ProRes profile numbers understood by FFmpeg's prores_ks encoder
+# profile 2 = ProRes 422, 3 = ProRes 422 HQ, 4 = ProRes 4444, 5 = ProRes 4444 XQ
+_PRORES_PROFILES = {
+    "MOV ProRes 422":      (2, False),
+    "MOV ProRes 422 HQ":   (3, False),
+    "MOV ProRes 4444":     (4, True),
+    "MOV ProRes 4444 XQ":  (5, True),
+}
+
+
+def _write_prores_mov(tensor: torch.Tensor, path: str, fps: float,
+                      profile: int, is_4444: bool):
+    """
+    Write a ProRes .mov using PyAV / FFmpeg (prores_ks encoder).
+
+    422 profiles  → 10-bit YUV 4:2:2  (yuv422p10le)
+    4444 profiles → 10-bit YUV 4:4:4  (yuva444p10le, alpha preserved if C==4)
+
+    Input tensor is expected in float32 [0, 1] — converted to 16-bit before
+    passing to PyAV which then downsamples to the correct 10-bit planar format.
+    """
+    try:
+        import av
+    except ImportError:
+        raise ImportError(
+            "ACESIOVideoSaver: PyAV (av) is required for ProRes/MOV export.\n"
+            "Install with:  pip install av"
+        )
+
+    B, H, W, C = tensor.shape
+    has_alpha = is_4444 and (C == 4)
+
+    # Intermediate packed format fed to PyAV; reformat() handles the
+    # colour-space / bit-depth conversion via libswscale.
+    src_fmt = "rgba64le" if has_alpha else "rgb48le"
+    pix_fmt = "yuva444p10le" if is_4444 else "yuv422p10le"
+
+    container = av.open(path, mode="w", format="mov")
+    stream = container.add_stream("prores_ks", rate=fps)
+    stream.width = W
+    stream.height = H
+    stream.pix_fmt = pix_fmt
+    stream.options = {"profile": str(profile)}
+
+    for i in range(B):
+        frame_np = (tensor[i].cpu().float().numpy() * 65535.0).clip(0, 65535).astype(np.uint16)
+        arr = frame_np if has_alpha else frame_np[:, :, :3]
+        av_frame = av.VideoFrame.from_ndarray(arr, format=src_fmt)
+        av_frame = av_frame.reformat(format=pix_fmt)
+        av_frame.pts = i
+        for pkt in stream.encode(av_frame):
+            container.mux(pkt)
+
+    for pkt in stream.encode():
+        container.mux(pkt)
+
+    container.close()
+
 
 def _write_webp(tensor: torch.Tensor, path: str, fps: float):
     frames = _tensor_to_pil_frames(tensor)

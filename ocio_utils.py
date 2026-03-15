@@ -50,6 +50,11 @@ BUILTIN_CONFIGS: Dict[str, str] = {
 }
 
 # Inject ACES 1.2 if already downloaded
+# Defined as a mutable list so that after a post-import download + _refresh_aces12()
+# call from __init__.py, nodes.py's binding (same object) sees the updated keys.
+BUILTIN_CONFIG_KEYS: list = []
+
+
 def _refresh_aces12():
     key = "ACES 1.2  (colour-science / OCIO v1)"
     if os.path.isfile(_ACES12_CFG):
@@ -64,11 +69,12 @@ def _refresh_aces12():
         BUILTIN_CONFIGS.update(ordered)
     else:
         BUILTIN_CONFIGS.pop(key, None)
-    global BUILTIN_CONFIG_KEYS
-    BUILTIN_CONFIG_KEYS = list(BUILTIN_CONFIGS.keys())
+    # Mutate in-place so all importers of this list see the change
+    BUILTIN_CONFIG_KEYS.clear()
+    BUILTIN_CONFIG_KEYS.extend(BUILTIN_CONFIGS.keys())
+
 
 _refresh_aces12()
-BUILTIN_CONFIG_KEYS = list(BUILTIN_CONFIGS.keys())
 
 # ---------------------------------------------------------------------------
 # Channel-view matrices  (row-major 4×4, same convention as Nuke viewer)

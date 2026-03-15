@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-aces-io"
-version = "1.2.0"
+version = "1.3.0"
 description = "OpenColorIO / ACES color-management nodes for ComfyUI — mirrors Nuke's OCIO node set with ACES 2.0, 1.3, and 1.2 support, EXR sequence loading, animated preview, and video export."
 license = { file = "LICENSE" }
 readme = "README.md"
