@@ -54,12 +54,6 @@ else:
     except Exception as _dl_e:
         _logger.warning(f"[ACES IO] Could not auto-download ACES 1.2 config: {_dl_e}")
 
-    from .wan_inverse_tonemap import (
-        NODE_CLASS_MAPPINGS        as _WAN_CM,
-        NODE_DISPLAY_NAME_MAPPINGS as _WAN_DNM,
-    )
-    NODE_CLASS_MAPPINGS        = {**NODE_CLASS_MAPPINGS,        **_WAN_CM}
-    NODE_DISPLAY_NAME_MAPPINGS = {**NODE_DISPLAY_NAME_MAPPINGS, **_WAN_DNM}
 
 # Serve web/js to the ComfyUI frontend
 WEB_DIRECTORY = "web"
