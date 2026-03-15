@@ -133,20 +133,17 @@ def download_aces12():
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_dir)
 
-        # The zip contains a top-level folder named OpenColorIO-Config-ACES-1.2/
-        src_dir = os.path.join(extract_dir, "OpenColorIO-Config-ACES-1.2")
-        if not os.path.isdir(src_dir):
-            # Fallback: find any directory inside extract_dir
-            entries = [
-                e for e in os.listdir(extract_dir)
-                if os.path.isdir(os.path.join(extract_dir, e))
-            ]
-            if entries:
-                src_dir = os.path.join(extract_dir, entries[0])
-            else:
-                raise RuntimeError(
-                    f"[ACES IO] Could not locate config directory inside zip."
-                )
+        # Find the directory that actually contains config.ocio — don't
+        # assume a fixed top-level folder name as it varies across releases.
+        src_dir = None
+        for root, dirs, files in os.walk(extract_dir):
+            if "config.ocio" in files:
+                src_dir = root
+                break
+        if src_dir is None:
+            raise RuntimeError(
+                "[ACES IO] config.ocio not found anywhere in the downloaded zip."
+            )
 
         os.makedirs(dest_dir, exist_ok=True)
         shutil.copytree(src_dir, dest_dir, dirs_exist_ok=True)
