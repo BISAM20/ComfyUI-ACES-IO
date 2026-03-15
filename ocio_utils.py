@@ -104,12 +104,9 @@ def load_config(preset: str, custom_path: str = "") -> ocio.Config:
             if builtin_name == _ACES12_CFG:
                 logger.info("[ACES IO] ACES 1.2 config not found — downloading now …")
                 from .install import download_aces12
-                download_aces12()
+                download_aces12()   # raises RuntimeError with details on failure
             if not os.path.isfile(builtin_name):
-                raise FileNotFoundError(
-                    f"OCIO config not found: '{builtin_name}'\n"
-                    "Download failed or was interrupted."
-                )
+                raise FileNotFoundError(f"OCIO config not found: '{builtin_name}'")
         if builtin_name not in _config_cache:
             _config_cache[builtin_name] = ocio.Config.CreateFromFile(builtin_name)
         return _config_cache[builtin_name]

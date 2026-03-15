@@ -153,9 +153,12 @@ def download_aces12():
         print(f"[ACES IO] ACES 1.2 config installed to: {dest_dir}")
 
     except Exception as exc:
-        print(f"[ACES IO] Warning: could not download ACES 1.2 config: {exc}")
-        print("[ACES IO]   You can install it manually from:")
-        print(f"[ACES IO]   {url}")
+        raise RuntimeError(
+            f"[ACES IO] Could not download ACES 1.2 config: {exc}\n"
+            f"  URL: {url}\n"
+            f"  Target: {dest_dir}\n"
+            "  Check network connectivity or download the zip manually and extract it there."
+        ) from exc
     finally:
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
