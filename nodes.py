@@ -607,13 +607,25 @@ class ACESIOInfo:
         return {"ui": {"text": [text]}, "result": (text,)}
 
 
+def _apply_colorspace(tensor: torch.Tensor, ocio_config: dict,
+                      src: str, dst: str) -> torch.Tensor:
+    """Apply an OCIO color space conversion to a tensor; no-op if src == dst."""
+    src, dst = src.strip(), dst.strip()
+    if src == dst:
+        return tensor
+    try:
+        return apply_processor(tensor, ocio_config["config"].getProcessor(src, dst))
+    except Exception as e:
+        raise RuntimeError(f"Color transform '{src}' → '{dst}' failed: {e}") from e
+
+
 # ============================================================================
 #  9.  ACESIOEXRSaver  —  save IMAGE tensor as OpenEXR
 # ============================================================================
 
 class ACESIOEXRSaver:
     """
-    Save a ComfyUI IMAGE tensor as an OpenEXR file.
+    Save a ComfyUI IMAGE tensor as an OpenEXR file  —  mirrors Nuke's Write node.
 
     Supports full 16-bit half-float and 32-bit float with all standard
     EXR compression codecs (ZIP, PIZ, DWAA, …).
@@ -621,6 +633,14 @@ class ACESIOEXRSaver:
     output_dir   Directory to write into  (use the Browse button to pick one).
     filename     Base filename without extension; %04d is replaced by the
                  frame/batch index, e.g.  render_%04d  →  render_0001.exr
+
+    Color transform  (Nuke Write-node style)
+    ────────────────────────────────────────
+    Connect ocio_config then set:
+      input_transform  — color space the incoming image is in  (working space)
+      colorspace       — color space to store in the EXR file  (file space)
+    The node converts input_transform → colorspace before writing.
+    Leave ocio_config disconnected to write pixels as-is.
     """
 
     @classmethod
@@ -637,7 +657,16 @@ class ACESIOEXRSaver:
                                 {"default": COMPRESSION_KEYS[0]}),
             },
             "optional": {
-                "start_frame": ("INT", {"default": 1, "min": 0, "max": 99999}),
+                "start_frame":     ("INT", {"default": 1, "min": 0, "max": 99999}),
+                "ocio_config":     ("OCIO_CONFIG",),
+                "input_transform": ("ACES_COLORSPACE", {
+                    "default": "ACEScg",
+                    "tooltip": "Color space of the incoming image (working / pipe space)",
+                }),
+                "colorspace":      ("ACES_COLORSPACE", {
+                    "default": "ACES2065-1",
+                    "tooltip": "Color space to store in the EXR file",
+                }),
             },
         }
 
@@ -648,7 +677,12 @@ class ACESIOEXRSaver:
     OUTPUT_NODE   = True
 
     def save(self, image, output_dir, filename, bit_depth, compression,
-             start_frame=1):
+             start_frame=1, ocio_config=None,
+             input_transform="ACEScg", colorspace="ACES2065-1"):
+
+        if ocio_config is not None:
+            image = _apply_colorspace(image, ocio_config, input_transform, colorspace)
+
         B = image.shape[0]
         last_path = ""
         for b in range(B):
@@ -848,6 +882,14 @@ class ACESIOEXRLoader:
     black   Substitute a black frame for any missing frame.
     hold    Repeat the last successfully loaded frame.
 
+    Color transform  (Nuke Read-node style)
+    ────────────────────────────────────────
+    Connect ocio_config then set:
+      colorspace        — color space the EXR is stored as  (file space)
+      output_transform  — color space to deliver downstream  (working space)
+    The node converts colorspace → output_transform after loading.
+    Leave ocio_config disconnected to return raw pixel values.
+
     Outputs: image  [B, H, W, C] · frame_count · first_frame · last_frame
     """
 
@@ -879,6 +921,15 @@ class ACESIOEXRLoader:
                     "default": 24.0, "min": 1.0, "max": 120.0, "step": 0.5,
                     "tooltip": "Animated preview playback speed",
                 }),
+                "ocio_config":        ("OCIO_CONFIG",),
+                "colorspace":         ("ACES_COLORSPACE", {
+                    "default": "ACES2065-1",
+                    "tooltip": "Color space the EXR file is stored in  (Nuke: colorspace knob)",
+                }),
+                "output_transform":   ("ACES_COLORSPACE", {
+                    "default": "ACEScg",
+                    "tooltip": "Color space to deliver to downstream nodes  (working / pipe space)",
+                }),
             },
         }
 
@@ -896,7 +947,10 @@ class ACESIOEXRLoader:
              frame_mode="all",
              first_frame=1001, last_frame=1001,
              missing_frames="error",
-             preview_fps=24.0):
+             preview_fps=24.0,
+             ocio_config=None,
+             colorspace="ACES2065-1",
+             output_transform="ACEScg"):
 
         path = os.path.expanduser(file_path.strip())
         if not path:
@@ -913,6 +967,8 @@ class ACESIOEXRLoader:
             arr = np.array(img, dtype=np.float32) / 255.0
             tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, C]
             print(f"[ACES IO] EXR Loader: plain image ({ext})  {path}")
+            if ocio_config is not None:
+                tensor = _apply_colorspace(tensor, ocio_config, colorspace, output_transform)
             previews = _save_animated_preview(tensor.clamp(0.0, 1.0), fps=preview_fps)
             return {
                 "ui":     {"images": previews},
@@ -933,7 +989,7 @@ class ACESIOEXRLoader:
             frame_set             = set(detected)
 
             if frame_mode == "all":
-                frames_to_load = detected           # every frame on disk
+                frames_to_load = detected
                 out_first, out_last = disk_first, disk_last
 
             elif frame_mode == "range":
@@ -955,6 +1011,10 @@ class ACESIOEXRLoader:
             print(f"[ACES IO] EXR Loader: {frame_mode}  "
                   f"{out_first}–{out_last}  ({tensor.shape[0]} frames)  "
                   f"disk: {disk_first}–{disk_last}")
+
+        # ── optional output color transform ───────────────────────────────
+        if ocio_config is not None:
+            tensor = _apply_colorspace(tensor, ocio_config, colorspace, output_transform)
 
         frame_count    = tensor.shape[0]
         preview_tensor = tensor.clamp(0.0, 1.0)
