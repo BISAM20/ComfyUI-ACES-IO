@@ -4,6 +4,13 @@ All notable changes to ComfyUI-ACES-IO are documented here.
 
 ---
 
+## [1.3.7] — 2026-03-16
+
+### Fixed
+- **ProRes MOV export crash**: `fps` is now wrapped in `Fraction` before being passed to PyAV's `add_stream(rate=...)`. PyAV's `to_avrational()` requires an object with a `.numerator` attribute (int or Fraction) — passing a plain float caused `AttributeError: 'float' object has no attribute 'numerator'`.
+
+---
+
 ## [1.3.6] — 2026-03-16
 
 ### Changed
