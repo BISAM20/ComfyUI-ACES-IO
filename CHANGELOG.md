@@ -4,10 +4,60 @@ All notable changes to ComfyUI-ACES-IO are documented here.
 
 ---
 
+## [1.3.6] — 2026-03-16
+
+### Changed
+- **README**: Updated documentation to cover all v1.3.x additions — OCIODisplay node, EXR color transforms, ProRes MOV export, ACES 1.2 auto-download, and Video Loader. Added dedicated sections for Display Transform, EXR Loader/Saver color transform inputs, and expanded Video Saver format table.
+- **CHANGELOG**: Back-filled entries for v1.3.0 through v1.3.4.
+
+---
+
 ## [1.3.5] — 2026-03-16
 
 ### Added
 - **ACES IO — Display Transform (OCIODisplay)**: New node mirroring Nuke's `OCIODisplay` node. Applies a Display View Transform (input colorspace → display + view pipeline) and bakes the result into image data — unlike the Viewer node which is preview-only. Includes an **Invert** boolean to reverse the transform direction (display-referred → scene-referred), matching Nuke's `invert` knob exactly.
+
+---
+
+## [1.3.4] — 2026-03-15
+
+### Changed
+- **EXR Saver** — added optional `ocio_config` input, `input_transform`, and `colorspace` knobs. Converts `input_transform → colorspace` before writing, mirroring Nuke's Write node. Conversion is skipped when `ocio_config` is disconnected.
+- **EXR Loader** — added optional `ocio_config` input, `colorspace`, and `output_transform` knobs. Converts `colorspace → output_transform` after loading, mirroring Nuke's Read node. Conversion is skipped when `ocio_config` is disconnected.
+
+---
+
+## [1.3.3] — 2026-03-15
+
+### Changed
+- Version bump (`pyproject.toml`).
+
+---
+
+## [1.3.2] — 2026-03-15
+
+### Changed
+- **ACES 1.2 always in dropdown**: `ACES 1.2` is now a permanent entry in `BUILTIN_CONFIGS` alongside ACES 1.3/2.0 — no longer conditionally injected only when the file already exists.
+- **Auto-download on first use**: `load_config()` now triggers the ACES 1.2 download automatically when the config file is missing, then loads it immediately — no manual path required.
+- Renamed preset label `"Custom path (ACES 1.2 / other)"` → `"Custom path (other)"` since ACES 1.2 has its own dedicated entry.
+
+---
+
+## [1.3.1] — 2026-03-15
+
+### Changed
+- Version bump (`pyproject.toml`).
+
+---
+
+## [1.3.0] — 2026-03-15
+
+### Added
+- **ProRes MOV export**: Video Saver now supports MOV ProRes 422, ProRes 422 HQ, ProRes 4444, and ProRes 4444 XQ formats via PyAV (`prores_ks` encoder; 10-bit YUV 4:2:2 / 4:4:4; alpha channel preserved for 4444 variants when input has 4 channels).
+
+### Fixed
+- **ACES 1.2 auto-download not running on fresh installs**: `download_aces12()` and `_refresh_aces12()` are now called from `__init__.py` at startup so the config is fetched before the first node execution.
+- **`BUILTIN_CONFIG_KEYS` stale-reference bug**: The list is now mutated in-place in `_refresh_aces12()` so `nodes.py`'s imported binding always reflects updated keys.
 
 ---
 
