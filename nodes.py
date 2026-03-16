@@ -1369,8 +1369,9 @@ def _write_prores_mov(tensor: torch.Tensor, path: str, fps: float,
     src_fmt = "rgba64le" if has_alpha else "rgb48le"
     pix_fmt = "yuva444p10le" if is_4444 else "yuv422p10le"
 
+    from fractions import Fraction
     container = av.open(path, mode="w", format="mov")
-    stream = container.add_stream("prores_ks", rate=fps)
+    stream = container.add_stream("prores_ks", rate=Fraction(fps).limit_denominator(10000))
     stream.width = W
     stream.height = H
     stream.pix_fmt = pix_fmt
