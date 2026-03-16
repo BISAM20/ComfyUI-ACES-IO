@@ -4,6 +4,13 @@ All notable changes to ComfyUI-ACES-IO are documented here.
 
 ---
 
+## [1.3.5] — 2026-03-16
+
+### Added
+- **ACES IO — Display Transform (OCIODisplay)**: New node mirroring Nuke's `OCIODisplay` node. Applies a Display View Transform (input colorspace → display + view pipeline) and bakes the result into image data — unlike the Viewer node which is preview-only. Includes an **Invert** boolean to reverse the transform direction (display-referred → scene-referred), matching Nuke's `invert` knob exactly.
+
+---
+
 ## [1.2.0] — 2026-03-11
 
 ### Added

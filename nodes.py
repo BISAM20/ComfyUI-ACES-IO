@@ -5,6 +5,7 @@ Mirrors Nuke's OCIO node set exactly:
   ACESIOConfig          ≈  Project Settings → OCIO config
   ACESIOColorSpace      ≈  OCIOColorSpace node
   ACESIOViewer          ≈  Nuke Viewer (display + exposure + gamma + channel view)
+  ACESIODisplay         ≈  OCIODisplay node (display view transform + invert)
   ACESIOLook            ≈  OCIOLookTransform node
   ACESIOFileLUT         ≈  OCIOFileTransform node
   ACESIOLogConvert      ≈  OCIOLogConvert node
@@ -323,6 +324,88 @@ class ACESIOViewer:
                 f"  input_colorspace = '{input_colorspace}'\n"
                 f"  display          = '{resolved_display}'\n"
                 f"  view             = '{resolved_view}'\n"
+                f"OCIO error: {e}\n"
+                f"Available displays: {available_displays}"
+            )
+
+        return (apply_processor(image, proc),)
+
+
+# ============================================================================
+#  4b. ACESIODisplay  —  display view transform  (OCIODisplay)
+# ============================================================================
+
+class ACESIODisplay:
+    """
+    Apply an OCIO Display View Transform to an image.
+    Mirrors Nuke's OCIODisplay node.
+
+    Converts the image from input_colorspace through the selected
+    display + view transform pipeline and bakes the result into the image data
+    (unlike the Viewer node, which is preview-only).
+
+    invert  When enabled, reverses the transform direction:
+            display-referred image → input_colorspace (scene-referred).
+            Useful for recovering scene-linear from a display-baked image
+            or for roundtrip work.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image":            ("IMAGE",),
+                "ocio_config":      ("OCIO_CONFIG",),
+                "input_colorspace": ("ACES_COLORSPACE", {"default": "ACEScg"}),
+                "display":          ("ACES_DISPLAY",    {"default": "sRGB - Display"}),
+                "view":             ("ACES_VIEW",       {"default": "ACES 2.0 - SDR 100 nits (Rec.709)"}),
+                "invert":           ("BOOLEAN",         {
+                    "default": False,
+                    "tooltip": "Invert the transform: display-referred → input colorspace",
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION     = "apply_display"
+    CATEGORY     = "ACES IO/Transform"
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+    def apply_display(self, image, ocio_config, input_colorspace, display, view, invert):
+        cfg = ocio_config["config"]
+
+        # Validate display/view against the loaded config; fall back to defaults
+        # when stored widget values don't match the selected config version.
+        available_displays = get_displays(cfg)
+        resolved_display = display.strip()
+        if resolved_display not in available_displays:
+            resolved_display = cfg.getDefaultDisplay()
+
+        available_views = get_views(cfg, resolved_display)
+        resolved_view = view.strip()
+        if resolved_view not in available_views:
+            resolved_view = cfg.getDefaultView(resolved_display)
+
+        dv = ocio.DisplayViewTransform()
+        dv.setSrc(input_colorspace.strip())
+        dv.setDisplay(resolved_display)
+        dv.setView(resolved_view)
+        if invert:
+            dv.setDirection(ocio.TRANSFORM_DIR_INVERSE)
+
+        try:
+            proc = cfg.getProcessor(dv)
+        except ocio.Exception as e:
+            raise ValueError(
+                f"ACESIODisplay: failed to build display transform.\n"
+                f"  input_colorspace = '{input_colorspace}'\n"
+                f"  display          = '{resolved_display}'\n"
+                f"  view             = '{resolved_view}'\n"
+                f"  invert           = {invert}\n"
                 f"OCIO error: {e}\n"
                 f"Available displays: {available_displays}"
             )
@@ -1365,6 +1448,7 @@ NODE_CLASS_MAPPINGS = {
     "ACESIOConfig":       ACESIOConfig,
     "ACESIOColorSpace":   ACESIOColorSpace,
     "ACESIOViewer":       ACESIOViewer,
+    "ACESIODisplay":      ACESIODisplay,
     "ACESIOLook":         ACESIOLook,
     "ACESIOFileLUT":      ACESIOFileLUT,
     "ACESIOLogConvert":   ACESIOLogConvert,
@@ -1380,6 +1464,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ACESIOConfig":       "ACES IO — Config Loader",
     "ACESIOColorSpace":   "ACES IO — ColorSpace  (OCIOColorSpace)",
     "ACESIOViewer":       "ACES IO — Viewer  (Nuke Viewer)",
+    "ACESIODisplay":      "ACES IO — Display Transform  (OCIODisplay)",
     "ACESIOLook":         "ACES IO — Look Transform  (OCIOLookTransform)",
     "ACESIOFileLUT":      "ACES IO — File LUT  (OCIOFileTransform)",
     "ACESIOLogConvert":   "ACES IO — Log Convert  (OCIOLogConvert)",
