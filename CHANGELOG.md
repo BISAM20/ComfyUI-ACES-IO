@@ -4,6 +4,14 @@ All notable changes to ComfyUI-ACES-IO are documented here.
 
 ---
 
+## [1.3.8] — 2026-03-16
+
+### Changed
+- **Video Saver — path browser**: Replaced single `output_path` string with `output_dir` (directory browser, same `ACES_PATH` widget as EXR Saver) + `filename` string input. Extension is still appended automatically.
+- **Video Saver — color transform**: Added optional `ocio_config`, `input_transform`, and `colorspace` inputs (same pattern as EXR Saver). Converts `input_transform → colorspace` before encoding; skipped when `ocio_config` is disconnected.
+
+---
+
 ## [1.3.7] — 2026-03-16
 
 ### Fixed

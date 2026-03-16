@@ -1258,9 +1258,17 @@ class ACESIOVideoSaver:
     Animated WebP       High-quality lossless/near-lossless, plays in browsers.
     Animated GIF        Universal compatibility; limited to 256 colours.
 
-    output_path
-        Full path including filename.  The correct extension is appended
-        automatically if missing (.mp4 / .mov / .webp / .gif).
+    output_dir   Directory to write into  (use the Browse button to pick one).
+    filename     Base filename without extension; the correct extension is
+                 appended automatically (.mp4 / .mov / .webp / .gif).
+
+    Color transform  (Nuke Write-node style)
+    ────────────────────────────────────────
+    Connect ocio_config then set:
+      input_transform  — color space the incoming image is in  (working space)
+      colorspace       — color space to encode into the video file
+    The node converts input_transform → colorspace before encoding.
+    Leave ocio_config disconnected to encode pixels as-is.
 
     The node passes the IMAGE tensor through unchanged so it can sit inline
     in any graph without interrupting the flow.
@@ -1280,16 +1288,31 @@ class ACESIOVideoSaver:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE",),
-                "output_path": ("ACES_PATH", {
-                    "default": os.path.expanduser("~/output.mp4"),
-                    "mode":    "file",
-                    "placeholder": "/path/to/output  (.mp4 / .mov / .webp / .gif)",
+                "images":     ("IMAGE",),
+                "output_dir": ("ACES_PATH", {
+                    "default": os.path.expanduser("~/"),
+                    "mode":    "dir",
+                }),
+                "filename":   ("STRING", {
+                    "default":   "output",
+                    "multiline": False,
+                    "placeholder": "output  (extension added automatically)",
                 }),
                 "format": (cls.FORMATS, {"default": "MP4 (H.264)"}),
                 "fps":    ("FLOAT", {
                     "default": 24.0, "min": 1.0, "max": 120.0, "step": 0.5,
                     "tooltip": "Frames per second",
+                }),
+            },
+            "optional": {
+                "ocio_config":     ("OCIO_CONFIG",),
+                "input_transform": ("ACES_COLORSPACE", {
+                    "default": "ACEScg",
+                    "tooltip": "Color space of the incoming image (working / pipe space)",
+                }),
+                "colorspace":      ("ACES_COLORSPACE", {
+                    "default": "sRGB Encoded Rec.709 (sRGB)",
+                    "tooltip": "Color space to encode into the video file",
                 }),
             },
         }
@@ -1300,29 +1323,38 @@ class ACESIOVideoSaver:
     CATEGORY      = "ACES IO/EXR"
     OUTPUT_NODE   = True
 
-    def save_video(self, images, output_path, format, fps):
-        path = output_path.strip()
-        if not path:
-            raise ValueError("ACESIOVideoSaver: output_path is empty.")
+    def save_video(self, images, output_dir, filename, format, fps,
+                   ocio_config=None, input_transform="ACEScg",
+                   colorspace="sRGB Encoded Rec.709 (sRGB)"):
 
+        if ocio_config is not None:
+            images = _apply_colorspace(images, ocio_config, input_transform, colorspace)
+
+        fname = filename.strip() or "output"
+        _EXT = {
+            "MP4 (H.264)":       ".mp4",
+            "MOV ProRes 422":    ".mov",
+            "MOV ProRes 422 HQ": ".mov",
+            "MOV ProRes 4444":   ".mov",
+            "MOV ProRes 4444 XQ":".mov",
+            "Animated WebP":     ".webp",
+            "Animated GIF":      ".gif",
+        }
+        ext = _EXT.get(format, "")
+        if not fname.lower().endswith(ext):
+            fname += ext
+
+        path = os.path.join(output_dir.strip(), fname)
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
         if format == "MP4 (H.264)":
-            if not path.lower().endswith(".mp4"):
-                path += ".mp4"
             _write_mp4(images, path, fps)
         elif format in _PRORES_PROFILES:
-            if not path.lower().endswith(".mov"):
-                path += ".mov"
             profile, is_4444 = _PRORES_PROFILES[format]
             _write_prores_mov(images, path, fps, profile, is_4444)
         elif format == "Animated WebP":
-            if not path.lower().endswith(".webp"):
-                path += ".webp"
             _write_webp(images, path, fps)
         elif format == "Animated GIF":
-            if not path.lower().endswith(".gif"):
-                path += ".gif"
             _write_gif(images, path, fps)
 
         B = images.shape[0]
